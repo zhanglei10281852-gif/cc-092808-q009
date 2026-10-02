@@ -5,8 +5,10 @@ import sqlite3
 from app.core.clock import Clock
 from app.forensics.cases import ForensicCaseService
 from app.forensics.custody import CustodyService
+from app.forensics.merges import CaseMergeService
 from app.forensics.quality import ReleaseService, QualityService
 from app.forensics.repository import ForensicRepository
+from app.forensics.supplementary import SupplementaryService
 from app.forensics.examinations import ExaminationService
 
 
@@ -21,6 +23,8 @@ class ForensicService:
         self.examinations = ExaminationService(connection, clock)
         self.quality = QualityService(connection, clock)
         self.release = ReleaseService(connection, clock)
+        self.supplementary = SupplementaryService(connection, clock)
+        self.merges = CaseMergeService(connection, clock)
 
     def dashboard(self) -> dict:
         return {
@@ -31,4 +35,6 @@ class ForensicService:
             "review_schedules": self.repository.count_table("review_schedules"),
             "quality_alerts": self.repository.count_table("quality_alerts"),
             "release_requests": self.repository.count_table("release_requests"),
+            "supplementary_packages": self.repository.count_table("supplementary_packages"),
+            "case_merges": self.repository.count_table("case_merges"),
         }

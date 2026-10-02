@@ -130,12 +130,21 @@ class SpecimenCreate(BaseModel):
     integrity_percent: float | None = Field(default=None, ge=0, le=100)
     packaging: str = Field(default="", max_length=500)
     sealed_on: date | None = None
+    seal_no: str | None = Field(default=None, max_length=80)
     created_by: str = Field(min_length=1, max_length=100)
 
     @field_validator("specimen_no")
     @classmethod
     def normalize_specimen_no(cls, value: str) -> str:
         return value.strip().upper()
+
+    @field_validator("seal_no")
+    @classmethod
+    def normalize_seal_no(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
 
 
 class PlacementCreate(BaseModel):
@@ -295,6 +304,101 @@ class ReleaseDecision(BaseModel):
     expected_version: int = Field(gt=0)
     actor: str = Field(min_length=1, max_length=100)
     reason: str = Field(default="", max_length=500)
+
+
+class SupplementaryItemCreate(BaseModel):
+    specimen_no: str = Field(min_length=3, max_length=60)
+    seal_no: str | None = Field(default=None, max_length=80)
+    quantity: float = Field(gt=0, le=10_000_000)
+    received_year: int = Field(ge=1800, le=2200)
+    packaging: str = Field(default="", max_length=500)
+
+    @field_validator("specimen_no")
+    @classmethod
+    def normalize_item_specimen_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("seal_no")
+    @classmethod
+    def normalize_item_seal_no(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+
+class SupplementaryPackageCreate(BaseModel):
+    package_no: str = Field(min_length=3, max_length=60)
+    agency_id: int | None = Field(default=None, gt=0)
+    commission_document: str = Field(default="", max_length=120)
+    case_number_aliases: list[str] = Field(default_factory=list, max_length=20)
+    reference_seals: list[str] = Field(default_factory=list, max_length=50)
+    items: list[SupplementaryItemCreate] = Field(min_length=1, max_length=50)
+    created_by: str = Field(min_length=1, max_length=100)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+
+    @field_validator("package_no")
+    @classmethod
+    def normalize_package_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("case_number_aliases", "reference_seals")
+    @classmethod
+    def normalize_text_list(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for entry in value:
+            stripped = entry.strip()
+            if stripped and stripped not in cleaned:
+                cleaned.append(stripped)
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_identification_material(self) -> "SupplementaryPackageCreate":
+        if (
+            not self.agency_id
+            and not self.commission_document.strip()
+            and not self.case_number_aliases
+            and not self.reference_seals
+        ):
+            raise ValueError("补送包至少提供委托机构、原始文书号、案号别名或参照封识号之一用于识别")
+        return self
+
+
+class SupplementaryConfirm(BaseModel):
+    case_id: int = Field(gt=0)
+    reason: str = Field(default="", max_length=500)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class SupplementaryConflictResolve(BaseModel):
+    decision: str = Field(pattern="^(receive|reject)$")
+    reason: str = Field(min_length=3, max_length=500)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class ReportCreate(BaseModel):
+    report_no: str = Field(min_length=3, max_length=60)
+    report_kind: str = Field(min_length=2, max_length=60)
+    summary: str = Field(default="", max_length=1000)
+    issued_by: str = Field(min_length=1, max_length=100)
+
+    @field_validator("report_no")
+    @classmethod
+    def normalize_report_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class CaseMergePreviewCreate(BaseModel):
+    source_case_id: int = Field(gt=0)
+    target_case_id: int = Field(gt=0)
+    field_resolutions: dict[str, str] = Field(default_factory=dict)
+    created_by: str = Field(min_length=1, max_length=100)
+
+
+class CaseMergeExecute(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
 
 
 class Page(BaseModel):

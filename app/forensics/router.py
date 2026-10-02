@@ -13,9 +13,12 @@ from app.forensics.schemas import (
     ForensicCasePatch,
     ForensicCaseTransition,
     AlertDecision,
+    CaseMergeExecute,
+    CaseMergePreviewCreate,
     ObservationCreate,
     ReleaseCreate,
     ReleaseDecision,
+    ReportCreate,
     HoldCreate,
     HoldRelease,
     LocationCreate,
@@ -26,6 +29,9 @@ from app.forensics.schemas import (
     ProtocolCreate,
     ReadingCreate,
     AgencyCreate,
+    SupplementaryConfirm,
+    SupplementaryConflictResolve,
+    SupplementaryPackageCreate,
     ExaminationComplete,
     ExaminationCreate,
     ExaminationInvalidate,
@@ -120,6 +126,103 @@ def transition_forensic_case(
 def forensic_case_restrictions(case_id: int, principal: Principal = Depends(current_principal)) -> dict:
     principal.require("forensic_cases.read")
     return _service().forensic_cases.restrictions_for(case_id)
+
+
+@router.get("/cases/resolve/{query}")
+def resolve_case_number(query: str, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().merges.resolve_number(query)
+
+
+@router.post("/cases/{case_id}/reports", status_code=201)
+def issue_report(case_id: int, data: ReportCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("quality.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).forensic_cases.issue_report(case_id, data.model_dump(mode="json"))
+
+
+@router.post("/supplementary-packages", status_code=201)
+def submit_supplementary_package(
+    data: SupplementaryPackageCreate, principal: Principal = Depends(current_principal)
+) -> dict:
+    principal.require("forensic_cases.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).supplementary.submit_package(data.model_dump(mode="json"))
+
+
+@router.get("/supplementary-packages")
+def list_supplementary_packages(
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("forensic_cases.read")
+    items, total = _service().repository.list_packages(status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/supplementary-packages/{package_id}")
+def supplementary_package_detail(package_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().repository.package_detail(package_id)
+
+
+@router.post("/supplementary-packages/{package_id}/confirm")
+def confirm_supplementary_package(
+    package_id: int, data: SupplementaryConfirm, principal: Principal = Depends(current_principal)
+) -> dict:
+    principal.require("forensic_cases.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).supplementary.confirm(package_id, data.model_dump(mode="json"))
+
+
+@router.post("/supplementary-packages/{package_id}/resolve-conflict")
+def resolve_supplementary_conflict(
+    package_id: int, data: SupplementaryConflictResolve, principal: Principal = Depends(current_principal)
+) -> dict:
+    principal.require("quality.review")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).supplementary.resolve_conflict(package_id, data.model_dump(mode="json"))
+
+
+@router.post("/case-merges/previews", status_code=201)
+def preview_case_merge(data: CaseMergePreviewCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.merge")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).merges.preview(data.model_dump(mode="json"))
+
+
+@router.get("/case-merges")
+def list_case_merges(
+    case_id: int | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("forensic_cases.read")
+    items, total = _service().repository.list_merges(case_id=case_id, limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/case-merges/{merge_id}")
+def case_merge_detail(merge_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().repository.merge_detail(merge_id)
+
+
+@router.post("/case-merges/{merge_id}/execute")
+def execute_case_merge(merge_id: int, data: CaseMergeExecute, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.merge")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).merges.execute(merge_id, data.actor)
+
+
+@router.post("/case-merges/{merge_id}/cancel")
+def cancel_case_merge(merge_id: int, data: CaseMergeExecute, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.merge")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).merges.cancel(merge_id, data.actor)
 
 
 @router.post("/locations", status_code=201)

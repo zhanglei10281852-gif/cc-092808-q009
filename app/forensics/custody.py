@@ -57,12 +57,13 @@ class CustodyService:
         try:
             cursor = self.connection.execute(
                 "INSERT INTO specimens(specimen_no,case_id,parent_specimen_id,received_year,initial_quantity,"
-                "available_quantity,integrity_percent,packaging,sealed_on,status,created_by,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
+                "available_quantity,integrity_percent,packaging,sealed_on,seal_no,status,created_by,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
                 (
                     data["specimen_no"], data["case_id"], data.get("parent_specimen_id"), data["received_year"],
                     data["initial_quantity"], data["initial_quantity"], data.get("integrity_percent"),
-                    data.get("packaging", ""), data.get("sealed_on"), data["created_by"], timestamp, timestamp,
+                    data.get("packaging", ""), data.get("sealed_on"), data.get("seal_no") or "",
+                    data["created_by"], timestamp, timestamp,
                 ),
             )
         except sqlite3.IntegrityError as exc:

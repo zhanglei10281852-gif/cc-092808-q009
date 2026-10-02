@@ -144,6 +144,33 @@ class ForensicCaseService:
         )
         return self.repository.forensic_case_detail(case_id)
 
+    def issue_report(self, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        forensic_case = self.repository.require_forensic_case(case_id)
+        if self.repository.executed_merge_for_source(case_id):
+            raise ConflictError("已归并的案件不能签发新报告，请在归并目标案件上签发")
+        if forensic_case["status"] not in {"accepted", "restricted"}:
+            raise ConflictError("只有正式接收或限制状态的案件可以签发报告", context={"status": forensic_case["status"]})
+        timestamp = to_storage(self.clock.now())
+        try:
+            cursor = self.connection.execute(
+                "INSERT INTO case_reports(case_id,report_no,report_kind,summary,issued_by,issued_at) VALUES(?,?,?,?,?,?)",
+                (
+                    case_id, data["report_no"], data["report_kind"], data.get("summary", ""),
+                    data["issued_by"], timestamp,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("报告编号已经存在") from exc
+        report_id = int(cursor.lastrowid)
+        self._event(case_id, "report_issued", data["issued_by"], None, None, {
+            "report_no": data["report_no"], "report_kind": data["report_kind"],
+        })
+        self._outbox(
+            f"forensic_case-report-{report_id}", "forensic_case.report.issued", "forensic_case", case_id,
+            {"report_no": data["report_no"]}, timestamp,
+        )
+        return record(self.connection.execute("SELECT * FROM case_reports WHERE id=?", (report_id,)).fetchone()) or {}
+
     def restrictions_for(self, case_id: int) -> dict[str, Any]:
         forensic_case = self.repository.require_forensic_case(case_id)
         source_rules: dict[str, Any] = {}

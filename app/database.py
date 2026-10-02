@@ -173,6 +173,83 @@ CREATE TABLE IF NOT EXISTS case_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_case_events ON case_events(case_id,id);
+CREATE TABLE IF NOT EXISTS case_number_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL,
+    normalized_alias TEXT NOT NULL UNIQUE,
+    alias_kind TEXT NOT NULL DEFAULT 'commission_no',
+    source TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_aliases ON case_number_aliases(case_id,id);
+CREATE TABLE IF NOT EXISTS case_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id) ON DELETE RESTRICT,
+    report_no TEXT NOT NULL UNIQUE,
+    report_kind TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    issued_by TEXT NOT NULL,
+    issued_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_reports ON case_reports(case_id,id);
+CREATE TABLE IF NOT EXISTS supplementary_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_no TEXT NOT NULL UNIQUE,
+    agency_id INTEGER REFERENCES submitting_agencies(id),
+    commission_document TEXT NOT NULL DEFAULT '',
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    reference_seals_json TEXT NOT NULL DEFAULT '[]',
+    candidates_json TEXT NOT NULL DEFAULT '[]',
+    conflicts_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','quarantined','conflict','received','rejected')),
+    confirmed_case_id INTEGER REFERENCES forensic_cases(id),
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_reason TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_packages_status ON supplementary_packages(status,created_at);
+CREATE TABLE IF NOT EXISTS supplementary_package_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL REFERENCES supplementary_packages(id) ON DELETE CASCADE,
+    specimen_no TEXT NOT NULL,
+    seal_no TEXT NOT NULL DEFAULT '',
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    received_year INTEGER NOT NULL CHECK(received_year BETWEEN 1800 AND 2200),
+    packaging TEXT NOT NULL DEFAULT '',
+    specimen_id INTEGER REFERENCES specimens(id)
+);
+CREATE INDEX IF NOT EXISTS idx_package_items ON supplementary_package_items(package_id,id);
+CREATE INDEX IF NOT EXISTS idx_package_items_seal ON supplementary_package_items(seal_no);
+CREATE TABLE IF NOT EXISTS supplementary_package_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL REFERENCES supplementary_packages(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_package_events ON supplementary_package_events(package_id,id);
+CREATE TABLE IF NOT EXISTS case_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    target_case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    field_resolutions_json TEXT NOT NULL DEFAULT '{}',
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'preview' CHECK(status IN ('preview','executed','cancelled')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    executed_by TEXT,
+    executed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_merges_source ON case_merges(source_case_id,status);
+CREATE INDEX IF NOT EXISTS idx_merges_target ON case_merges(target_case_id,status);
 
 CREATE TABLE IF NOT EXISTS storage_locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,6 +277,7 @@ CREATE TABLE IF NOT EXISTS specimens (
     integrity_percent REAL CHECK(integrity_percent >= 0 AND integrity_percent <= 100),
     packaging TEXT NOT NULL DEFAULT '',
     sealed_on TEXT,
+    seal_no TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','stored','held','depleted','disposed')),
     version INTEGER NOT NULL DEFAULT 1,
     created_by TEXT NOT NULL,
@@ -405,6 +483,7 @@ PERMISSIONS = [
     ("jobs.run", "执行后台任务", "jobs", "run"),
     ("forensic_cases.read", "查看鉴定材料", "forensic_cases", "read"),
     ("forensic_cases.write", "维护鉴定材料", "forensic_cases", "write"),
+    ("forensic_cases.merge", "归并误建案件", "forensic_cases", "merge"),
     ("custody.read", "查看库存", "custody", "read"),
     ("custody.write", "维护库存", "custody", "write"),
     ("examination.read", "查看检验记录", "examination", "read"),
@@ -468,10 +547,19 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         raise
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """为早期版本已建表的数据库补充新增列，保持结构一致。"""
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
 def init_db() -> None:
     timestamp = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _ensure_column(connection, "specimens", "seal_no", "seal_no TEXT NOT NULL DEFAULT ''")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_specimens_seal ON specimens(seal_no)")
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
