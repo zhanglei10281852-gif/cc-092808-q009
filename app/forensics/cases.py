@@ -48,7 +48,7 @@ class ForensicCaseService:
             (json.dumps(restrictions, ensure_ascii=False, sort_keys=True), timestamp, agency_id),
         )
         after = self.repository.require_agency(agency_id)
-        self._outbox(
+        self.emit_outbox(
             f"source-restrictions-{agency_id}-{timestamp}", "source.restrictions.changed", "source", agency_id,
             {"before": before.get("restrictions", {}), "after": after.get("restrictions", {})}, timestamp,
         )
@@ -71,8 +71,8 @@ class ForensicCaseService:
             ),
         )
         case_id = int(cursor.lastrowid)
-        self._event(case_id, "created", data["created_by"], None, "draft", {"number": data["case_no"]})
-        self._outbox(
+        self.record_event(case_id, "created", data["created_by"], None, "draft", {"number": data["case_no"]})
+        self.emit_outbox(
             f"forensic_case-created-{case_id}", "forensic_case.created", "forensic_case", case_id,
             {"case_no": data["case_no"], "discipline": data["discipline"]}, timestamp,
         )
@@ -109,7 +109,7 @@ class ForensicCaseService:
         if cursor.rowcount != 1:
             raise ConflictError("鉴定案件版本冲突")
         after = self.repository.require_forensic_case(case_id)
-        self._event(case_id, "updated", data["actor"], before["status"], after["status"], {
+        self.record_event(case_id, "updated", data["actor"], before["status"], after["status"], {
             "changed_fields": sorted(allowed), "before_version": before["version"], "after_version": after["version"]
         })
         return self.repository.forensic_case_detail(case_id)
@@ -137,11 +137,29 @@ class ForensicCaseService:
         )
         if cursor.rowcount != 1:
             raise ConflictError("鉴定案件状态版本冲突")
-        self._event(case_id, "status_changed", data["actor"], current, target, {"reason": reason})
-        self._outbox(
+        self.record_event(case_id, "status_changed", data["actor"], current, target, {"reason": reason})
+        self.emit_outbox(
             f"forensic_case-status-{case_id}-{int(before['version']) + 1}", "forensic_case.status.changed",
             "forensic_case", case_id, {"from": current, "to": target, "reason": reason}, timestamp,
         )
+        return self.repository.forensic_case_detail(case_id)
+
+    def sign_report(self, case_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        before = self.repository.require_forensic_case(case_id)
+        if int(before["version"]) != int(data["expected_version"]):
+            raise ConflictError("鉴定案件版本冲突", context={"current_version": before["version"]})
+        if before.get("report_signed_at"):
+            raise ConflictError("鉴定报告已经签发，签发记录不可更改")
+        if before["status"] not in {"accepted", "restricted"}:
+            raise ConflictError("只有已受理的案件可以签发鉴定报告")
+        timestamp = to_storage(self.clock.now())
+        cursor = self.connection.execute(
+            "UPDATE forensic_cases SET report_signed_at=?,version=version+1,updated_at=? WHERE id=? AND version=?",
+            (timestamp, timestamp, case_id, data["expected_version"]),
+        )
+        if cursor.rowcount != 1:
+            raise ConflictError("鉴定案件版本冲突")
+        self.record_event(case_id, "report_signed", data["actor"], before["status"], before["status"], {"signed_at": timestamp})
         return self.repository.forensic_case_detail(case_id)
 
     def restrictions_for(self, case_id: int) -> dict[str, Any]:
@@ -162,7 +180,7 @@ class ForensicCaseService:
             ),
         }
 
-    def _event(
+    def record_event(
         self,
         case_id: int,
         event_type: str,
@@ -180,7 +198,7 @@ class ForensicCaseService:
             ),
         )
 
-    def _outbox(
+    def emit_outbox(
         self,
         event_key: str,
         event_type: str,

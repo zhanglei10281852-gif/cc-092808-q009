@@ -155,6 +155,8 @@ CREATE TABLE IF NOT EXISTS forensic_cases (
     status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','quarantine','accepted','restricted','retired')),
     return_reason TEXT NOT NULL DEFAULT '',
     case_profile_json TEXT NOT NULL DEFAULT '{}',
+    report_signed_at TEXT,
+    merged_into_case_id INTEGER REFERENCES forensic_cases(id),
     version INTEGER NOT NULL DEFAULT 1,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -173,6 +175,90 @@ CREATE TABLE IF NOT EXISTS case_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_case_events ON case_events(case_id,id);
+
+CREATE TABLE IF NOT EXISTS supplement_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_no TEXT NOT NULL UNIQUE,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    agency_id INTEGER NOT NULL REFERENCES submitting_agencies(id),
+    document_no TEXT NOT NULL DEFAULT '',
+    case_no_alias TEXT NOT NULL DEFAULT '',
+    seal_nos_json TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','quarantined','confirmed','conflict')),
+    matched_case_id INTEGER REFERENCES forensic_cases(id),
+    conflict_json TEXT NOT NULL DEFAULT '{}',
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_reason TEXT NOT NULL DEFAULT '',
+    resolved_by TEXT,
+    resolved_at TEXT,
+    resolution_reason TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_supplement_packages_status ON supplement_packages(status,created_at);
+CREATE INDEX IF NOT EXISTS idx_supplement_packages_case ON supplement_packages(matched_case_id);
+CREATE TABLE IF NOT EXISTS supplement_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL REFERENCES supplement_packages(id) ON DELETE CASCADE,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    score INTEGER NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    UNIQUE(package_id,case_id)
+);
+CREATE TABLE IF NOT EXISTS supplement_package_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL REFERENCES supplement_packages(id),
+    specimen_id INTEGER NOT NULL REFERENCES specimens(id),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(package_id,specimen_id)
+);
+CREATE TABLE IF NOT EXISTS seal_registry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    seal_no TEXT NOT NULL,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    package_id INTEGER REFERENCES supplement_packages(id),
+    registered_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(seal_no,case_id)
+);
+CREATE INDEX IF NOT EXISTS idx_seal_registry_case ON seal_registry(case_id);
+CREATE TABLE IF NOT EXISTS case_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias_no TEXT NOT NULL UNIQUE,
+    case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    kind TEXT NOT NULL DEFAULT 'alias' CHECK(kind IN ('alias','merged_from','supplement')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_case_aliases_case ON case_aliases(case_id);
+CREATE TABLE IF NOT EXISTS case_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    merge_no TEXT NOT NULL UNIQUE,
+    source_case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    target_case_id INTEGER NOT NULL REFERENCES forensic_cases(id),
+    status TEXT NOT NULL DEFAULT 'previewed' CHECK(status IN ('previewed','executed','cancelled')),
+    reason TEXT NOT NULL,
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    decisions_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    executed_by TEXT,
+    executed_at TEXT,
+    cancelled_by TEXT,
+    cancelled_at TEXT,
+    cancel_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_case_merges_active_source ON case_merges(source_case_id) WHERE status IN ('previewed','executed');
+CREATE INDEX IF NOT EXISTS idx_case_merges_target ON case_merges(target_case_id);
 
 CREATE TABLE IF NOT EXISTS storage_locations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,6 +497,9 @@ PERMISSIONS = [
     ("examination.write", "执行检验任务", "examination", "write"),
     ("quality.review", "复核质量结果", "quality", "review"),
     ("release.approve", "审批鉴定领用", "release", "approve"),
+    ("supplement.write", "登记补送并确认归并", "supplement", "write"),
+    ("supplement.review", "处理补送冲突", "supplement", "review"),
+    ("case_merge.execute", "预演并执行案件归并", "case_merge", "execute"),
 ]
 
 
@@ -468,10 +557,18 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         raise
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     timestamp = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _ensure_column(connection, "forensic_cases", "report_signed_at", "TEXT")
+        _ensure_column(connection, "forensic_cases", "merged_into_case_id", "INTEGER REFERENCES forensic_cases(id)")
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
@@ -495,9 +592,9 @@ def init_db() -> None:
             (administrator, timestamp),
         )
         role_permissions = {
-            "registrar": ["forensic_cases.read", "forensic_cases.write", "custody.read", "custody.write"],
+            "registrar": ["forensic_cases.read", "forensic_cases.write", "custody.read", "custody.write", "supplement.write"],
             "technician": ["forensic_cases.read", "custody.read", "examination.read", "examination.write"],
-            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "release.approve"],
+            "curator": ["forensic_cases.read", "custody.read", "examination.read", "quality.review", "release.approve", "supplement.review"],
             "auditor": ["forensic_cases.read", "custody.read", "examination.read", "audit.read"],
         }
         for role_code, codes in role_permissions.items():

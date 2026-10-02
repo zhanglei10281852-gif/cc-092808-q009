@@ -13,9 +13,13 @@ from app.forensics.schemas import (
     ForensicCasePatch,
     ForensicCaseTransition,
     AlertDecision,
+    CaseMergeCancel,
+    CaseMergeCreate,
+    CaseMergeExecute,
     ObservationCreate,
     ReleaseCreate,
     ReleaseDecision,
+    ReportSign,
     HoldCreate,
     HoldRelease,
     LocationCreate,
@@ -30,9 +34,14 @@ from app.forensics.schemas import (
     ExaminationCreate,
     ExaminationInvalidate,
     ExaminationStart,
+    SupplementConflictResolve,
+    SupplementConfirm,
+    SupplementItemCreate,
+    SupplementPackageCreate,
     WithdrawalCreate,
 )
 from app.forensics.service import ForensicService
+from app.services.audit import AuditContext
 
 
 router = APIRouter(prefix="/api/forensics", tags=["鉴定案件"])
@@ -40,6 +49,10 @@ router = APIRouter(prefix="/api/forensics", tags=["鉴定案件"])
 
 def _service() -> ForensicService:
     return ForensicService(get_connection())
+
+
+def _audit_context(principal: Principal) -> AuditContext:
+    return AuditContext(principal.user_id, principal.display_name)
 
 
 @router.get("/dashboard")
@@ -86,6 +99,12 @@ def list_forensic_cases(
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
+@router.get("/cases/resolve/{case_no}")
+def resolve_case_number(case_no: str, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().repository.resolve_case_number(case_no)
+
+
 @router.get("/cases/{case_id}")
 def forensic_case_detail(case_id: int, principal: Principal = Depends(current_principal)) -> dict:
     principal.require("forensic_cases.read")
@@ -120,6 +139,129 @@ def transition_forensic_case(
 def forensic_case_restrictions(case_id: int, principal: Principal = Depends(current_principal)) -> dict:
     principal.require("forensic_cases.read")
     return _service().forensic_cases.restrictions_for(case_id)
+
+
+@router.post("/cases/{case_id}/sign-report")
+def sign_report(
+    case_id: int,
+    data: ReportSign,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("forensic_cases.write")
+    with transaction(immediate=True) as connection:
+        return ForensicService(connection).forensic_cases.sign_report(case_id, data.model_dump(mode="json"))
+
+
+@router.post("/supplements", status_code=201)
+def register_supplement(data: SupplementPackageCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("supplement.write")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.supplements.register_package(data.model_dump(mode="json"))
+
+
+@router.get("/supplements")
+def list_supplements(
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("forensic_cases.read")
+    items, total = _service().repository.list_packages(status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/supplements/{package_id}")
+def supplement_detail(package_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().repository.package_detail(package_id)
+
+
+@router.post("/supplements/{package_id}/confirm")
+def confirm_supplement(
+    package_id: int,
+    data: SupplementConfirm,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("supplement.write")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.supplements.confirm(package_id, data.model_dump(mode="json"))
+
+
+@router.post("/supplements/{package_id}/resolve")
+def resolve_supplement_conflict(
+    package_id: int,
+    data: SupplementConflictResolve,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("supplement.review")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.supplements.resolve_conflict(package_id, data.model_dump(mode="json"))
+
+
+@router.post("/supplements/{package_id}/items", status_code=201)
+def add_supplement_item(
+    package_id: int,
+    data: SupplementItemCreate,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("supplement.write")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.supplements.add_item(package_id, data.model_dump(mode="json"))
+
+
+@router.post("/case-merges", status_code=201)
+def preview_case_merge(data: CaseMergeCreate, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("case_merge.execute")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.merges.preview(data.model_dump(mode="json"))
+
+
+@router.get("/case-merges")
+def list_case_merges(
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("forensic_cases.read")
+    items, total = _service().repository.list_merges(status=status, limit=limit, offset=offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/case-merges/{merge_id}")
+def case_merge_detail(merge_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    principal.require("forensic_cases.read")
+    return _service().repository.merge_detail(merge_id)
+
+
+@router.post("/case-merges/{merge_id}/execute")
+def execute_case_merge(
+    merge_id: int,
+    data: CaseMergeExecute,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("case_merge.execute")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.merges.execute(merge_id, data.model_dump(mode="json"))
+
+
+@router.post("/case-merges/{merge_id}/cancel")
+def cancel_case_merge(
+    merge_id: int,
+    data: CaseMergeCancel,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    principal.require("case_merge.execute")
+    with transaction(immediate=True) as connection:
+        service = ForensicService(connection, audit_context=_audit_context(principal))
+        return service.merges.cancel(merge_id, data.model_dump(mode="json"))
 
 
 @router.post("/locations", status_code=201)

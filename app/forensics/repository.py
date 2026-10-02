@@ -12,7 +12,18 @@ JSON_COLUMNS = {
     "contact_json": "restrictions",
     "detail_json": "detail",
     "payload_json": "payload",
+    "seal_nos_json": "seal_nos",
+    "evidence_json": "evidence",
+    "conflict_json": "conflict",
+    "plan_json": "plan",
+    "decisions_json": "decisions",
+    "result_json": "result",
 }
+
+
+def case_closed(case: dict[str, Any]) -> bool:
+    """已退出保存或已签发报告的案件视为关闭签发。"""
+    return case.get("status") == "retired" or bool(case.get("report_signed_at"))
 
 
 def record(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -62,7 +73,52 @@ class ForensicRepository:
         item["events"] = records(self.connection.execute(
             "SELECT * FROM case_events WHERE case_id=? ORDER BY id", (case_id,)
         ).fetchall())
+        item["aliases"] = records(self.connection.execute(
+            "SELECT * FROM case_aliases WHERE case_id=? ORDER BY id", (case_id,)
+        ).fetchall())
+        item["merged_into"] = self._final_merge_target(item)
+        item["merged_from"] = records(self.connection.execute(
+            "SELECT m.id,m.merge_no,m.source_case_id,c.case_no AS source_case_no,m.executed_at FROM case_merges m "
+            "JOIN forensic_cases c ON c.id=m.source_case_id WHERE m.target_case_id=? AND m.status='executed' ORDER BY m.id",
+            (case_id,),
+        ).fetchall())
         return item
+
+    def _final_merge_target(self, case: dict[str, Any]) -> dict[str, Any] | None:
+        seen: set[int] = set()
+        current = case
+        while current.get("merged_into_case_id") and int(current["id"]) not in seen and len(seen) < 10:
+            seen.add(int(current["id"]))
+            current = self.require_forensic_case(int(current["merged_into_case_id"]))
+        if int(current["id"]) == int(case["id"]):
+            return None
+        return {
+            "case_id": current["id"],
+            "case_no": current["case_no"],
+            "case_name": current["case_name"],
+            "status": current["status"],
+        }
+
+    def resolve_case_number(self, case_no: str) -> dict[str, Any]:
+        normalized = case_no.strip().upper()
+        case = record(self.connection.execute("SELECT * FROM forensic_cases WHERE case_no=?", (normalized,)).fetchone())
+        via = "direct"
+        if case is None:
+            alias = record(self.connection.execute("SELECT * FROM case_aliases WHERE alias_no=?", (normalized,)).fetchone())
+            if alias is None:
+                raise NotFoundError("无法解析该案件编号")
+            case = self.require_forensic_case(int(alias["case_id"]))
+            via = "alias"
+        detail = self.forensic_case_detail(int(case["id"]))
+        resolution = via
+        if case.get("merged_into_case_id"):
+            resolution = "merged" if via == "direct" else "merged_alias"
+        return {"query": case_no, "resolution": resolution, "case": detail, "merged_into": detail.get("merged_into")}
+
+    def matching_cases(self) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM forensic_cases WHERE merged_into_case_id IS NULL ORDER BY id"
+        ).fetchall())
 
     def list_forensic_cases(self, *, status: str | None, crop: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
         where: list[str] = []
@@ -202,10 +258,119 @@ class ForensicRepository:
         ).fetchall())
         return item
 
+    def require_package(self, package_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM supplement_packages WHERE id=?", (package_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("补送包不存在")
+        return item
+
+    def package_detail(self, package_id: int) -> dict[str, Any]:
+        item = self.require_package(package_id)
+        item["agency"] = self.require_agency(int(item["agency_id"]))
+        candidates = records(self.connection.execute(
+            "SELECT * FROM supplement_candidates WHERE package_id=? ORDER BY score DESC,id", (package_id,)
+        ).fetchall())
+        for candidate in candidates:
+            forensic_case = self.require_forensic_case(int(candidate["case_id"]))
+            candidate["case"] = {
+                "id": forensic_case["id"],
+                "case_no": forensic_case["case_no"],
+                "case_name": forensic_case["case_name"],
+                "discipline": forensic_case["discipline"],
+                "status": forensic_case["status"],
+                "closed": case_closed(forensic_case),
+            }
+        item["candidates"] = candidates
+        item["items"] = records(self.connection.execute(
+            "SELECT i.*,s.specimen_no,s.status AS specimen_status FROM supplement_package_items i "
+            "JOIN specimens s ON s.id=i.specimen_id WHERE i.package_id=? ORDER BY i.id", (package_id,)
+        ).fetchall())
+        item["matched_case"] = None
+        if item.get("matched_case_id"):
+            matched = self.require_forensic_case(int(item["matched_case_id"]))
+            item["matched_case"] = {
+                "id": matched["id"],
+                "case_no": matched["case_no"],
+                "case_name": matched["case_name"],
+                "status": matched["status"],
+                "closed": case_closed(matched),
+            }
+        item["seal_conflicts"] = [
+            row for row in self.seal_owners(item["seal_nos"])
+            if item.get("matched_case_id") is None or int(row["case_id"]) != int(item["matched_case_id"])
+        ]
+        return item
+
+    def list_packages(self, *, status: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        clause = ""
+        params: list[Any] = []
+        if status:
+            clause = " WHERE status=?"
+            params.append(status)
+        total = int(self.connection.execute(f"SELECT COUNT(*) FROM supplement_packages{clause}", params).fetchone()[0])
+        rows = self.connection.execute(
+            f"SELECT * FROM supplement_packages{clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, limit, offset)
+        ).fetchall()
+        return records(rows), total
+
+    def seal_owners(self, seal_nos: list[str]) -> list[dict[str, Any]]:
+        if not seal_nos:
+            return []
+        placeholders = ",".join("?" for _ in seal_nos)
+        return records(self.connection.execute(
+            f"SELECT r.*,c.case_no FROM seal_registry r JOIN forensic_cases c ON c.id=r.case_id "
+            f"WHERE r.seal_no IN ({placeholders}) ORDER BY r.seal_no,r.id",
+            tuple(seal_nos),
+        ).fetchall())
+
+    def aliases_for_case(self, case_id: int) -> list[dict[str, Any]]:
+        return records(self.connection.execute(
+            "SELECT * FROM case_aliases WHERE case_id=? ORDER BY id", (case_id,)
+        ).fetchall())
+
+    def require_merge(self, merge_id: int) -> dict[str, Any]:
+        item = record(self.connection.execute("SELECT * FROM case_merges WHERE id=?", (merge_id,)).fetchone())
+        if item is None:
+            raise NotFoundError("案件归并记录不存在")
+        return item
+
+    def merge_detail(self, merge_id: int) -> dict[str, Any]:
+        item = self.require_merge(merge_id)
+        for key in ("source_case_id", "target_case_id"):
+            forensic_case = self.require_forensic_case(int(item[key]))
+            item["source_case" if key == "source_case_id" else "target_case"] = {
+                "id": forensic_case["id"],
+                "case_no": forensic_case["case_no"],
+                "case_name": forensic_case["case_name"],
+                "discipline": forensic_case["discipline"],
+                "status": forensic_case["status"],
+                "merged_into_case_id": forensic_case.get("merged_into_case_id"),
+            }
+        return item
+
+    def list_merges(self, *, status: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+        clause = ""
+        params: list[Any] = []
+        if status:
+            clause = " WHERE status=?"
+            params.append(status)
+        total = int(self.connection.execute(f"SELECT COUNT(*) FROM case_merges{clause}", params).fetchone()[0])
+        rows = self.connection.execute(
+            f"SELECT * FROM case_merges{clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*params, limit, offset)
+        ).fetchall()
+        return records(rows), total
+
+    def active_merge_for_source(self, source_case_id: int) -> dict[str, Any] | None:
+        return record(self.connection.execute(
+            "SELECT * FROM case_merges WHERE source_case_id=? AND status IN ('previewed','executed')",
+            (source_case_id,),
+        ).fetchone())
+
     def count_table(self, table: str) -> int:
         allowed = {
             "forensic_cases", "specimens", "storage_locations", "examinations",
             "review_schedules", "quality_alerts", "release_requests",
+            "supplement_packages", "case_merges",
         }
         if table not in allowed:
             raise ValueError("不允许统计该数据表")

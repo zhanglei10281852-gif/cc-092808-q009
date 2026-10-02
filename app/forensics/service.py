@@ -5,15 +5,23 @@ import sqlite3
 from app.core.clock import Clock
 from app.forensics.cases import ForensicCaseService
 from app.forensics.custody import CustodyService
+from app.forensics.merges import CaseMergeService
 from app.forensics.quality import ReleaseService, QualityService
 from app.forensics.repository import ForensicRepository
 from app.forensics.examinations import ExaminationService
+from app.forensics.supplements import SupplementService
+from app.services.audit import AuditContext
 
 
 class ForensicService:
     """把共享事务连接交给各业务边界，便于 API 与 CLI 原子调用。"""
 
-    def __init__(self, connection: sqlite3.Connection, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        clock: Clock | None = None,
+        audit_context: AuditContext | None = None,
+    ) -> None:
         self.connection = connection
         self.repository = ForensicRepository(connection)
         self.forensic_cases = ForensicCaseService(connection, clock)
@@ -21,6 +29,8 @@ class ForensicService:
         self.examinations = ExaminationService(connection, clock)
         self.quality = QualityService(connection, clock)
         self.release = ReleaseService(connection, clock)
+        self.supplements = SupplementService(connection, clock, audit_context)
+        self.merges = CaseMergeService(connection, clock, audit_context)
 
     def dashboard(self) -> dict:
         return {
@@ -31,4 +41,6 @@ class ForensicService:
             "review_schedules": self.repository.count_table("review_schedules"),
             "quality_alerts": self.repository.count_table("quality_alerts"),
             "release_requests": self.repository.count_table("release_requests"),
+            "supplement_packages": self.repository.count_table("supplement_packages"),
+            "case_merges": self.repository.count_table("case_merges"),
         }

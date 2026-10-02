@@ -297,6 +297,96 @@ class ReleaseDecision(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+class ReportSign(BaseModel):
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class SupplementPackageCreate(BaseModel):
+    package_no: str = Field(min_length=3, max_length=60)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+    agency_id: int = Field(gt=0)
+    document_no: str = Field(default="", max_length=120)
+    case_no_alias: str = Field(default="", max_length=80)
+    seal_nos: list[str] = Field(default_factory=list, max_length=50)
+    notes: str = Field(default="", max_length=500)
+    created_by: str = Field(min_length=1, max_length=100)
+
+    @field_validator("package_no")
+    @classmethod
+    def normalize_package_no(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if " " in normalized:
+            raise ValueError("补送包编号不能包含空格")
+        return normalized
+
+    @field_validator("seal_nos")
+    @classmethod
+    def normalize_seal_nos(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            seal = item.strip().upper()
+            if not seal or len(seal) > 80:
+                raise ValueError("封识号长度必须在 1 到 80 个字符之间")
+            if seal not in normalized:
+                normalized.append(seal)
+        return normalized
+
+    @field_validator("document_no", "case_no_alias", "notes", "created_by")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class SupplementConfirm(BaseModel):
+    case_id: int = Field(gt=0)
+    reason: str = Field(default="", max_length=500)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class SupplementConflictResolve(BaseModel):
+    action: str = Field(pattern="^(override_confirm|reject)$")
+    reason: str = Field(min_length=2, max_length=500)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class SupplementItemCreate(BaseModel):
+    specimen_no: str = Field(min_length=3, max_length=60)
+    parent_specimen_id: int | None = Field(default=None, gt=0)
+    received_year: int = Field(ge=1800, le=2200)
+    initial_quantity: float = Field(gt=0, le=10_000_000)
+    integrity_percent: float | None = Field(default=None, ge=0, le=100)
+    packaging: str = Field(default="", max_length=500)
+    sealed_on: date | None = None
+    created_by: str = Field(min_length=1, max_length=100)
+
+    @field_validator("specimen_no")
+    @classmethod
+    def normalize_specimen_no(cls, value: str) -> str:
+        return value.strip().upper()
+
+
+class CaseMergeCreate(BaseModel):
+    source_case_id: int = Field(gt=0)
+    target_case_id: int = Field(gt=0)
+    reason: str = Field(min_length=2, max_length=500)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class CaseMergeExecute(BaseModel):
+    field_decisions: dict[str, str] = Field(default_factory=dict)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class CaseMergeCancel(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+    expected_version: int = Field(gt=0)
+    actor: str = Field(min_length=1, max_length=100)
+
+
 class Page(BaseModel):
     items: list[dict[str, Any]]
     total: int
